@@ -2,7 +2,7 @@ name: MIUI
 on:
   workflow_call:
   workflow_dispatch:
-  
+
 jobs:
    build-project:
     runs-on: ubuntu-latest
@@ -22,8 +22,7 @@ jobs:
           libghc-libyaml-dev libyaml-dev glibc-source \
     - name: ready compile...
       run: |
-          curl -s https://raw.githubusercontent.com/Rx-de/script/main/miui.sh > miui.sh 
-          chmod +x miui.sh 
+          curl -s https://raw.githubusercontent.com/Rx-de/script/main/miui.sh > miui.sh
+          chmod +x miui.sh
           bash miui.sh
-      
 
