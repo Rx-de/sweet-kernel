@@ -292,7 +292,7 @@ static void do_update_uid(struct work_struct *work)
 	}
 
 	// then prune the allowlist
-	ksu_prune_allowlist(is_uid_exist, &uid_list);
+	//ksu_prune_allowlist(is_uid_exist, &uid_list);
 out:
 	// free uid_list
 	list_for_each_entry_safe (np, n, &uid_list, list) {
