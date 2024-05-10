@@ -1,7 +1,7 @@
 #ifndef __KSU_H_ARCH
 #define __KSU_H_ARCH
 
-#include "linux/version.h"
+#include <linux/version.h>
 
 #if defined(__aarch64__)
 
@@ -82,5 +82,11 @@
 #define PT_REGS_RC(x) (__PT_REGS_CAST(x)->__PT_RC_REG)
 #define PT_REGS_SP(x) (__PT_REGS_CAST(x)->__PT_SP_REG)
 #define PT_REGS_IP(x) (__PT_REGS_CAST(x)->__PT_IP_REG)
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 16, 0)
+#define PT_REAL_REGS(regs) ((struct pt_regs *)PT_REGS_PARM1(regs))
+#else
+#define PT_REAL_REGS(regs) ((regs))
+#endif
 
 #endif
