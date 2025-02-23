@@ -10,6 +10,7 @@ use anyhow::bail;
 use anyhow::ensure;
 use anyhow::Context;
 use anyhow::Result;
+use regex_lite::Regex;
 use which::which;
 
 use crate::defs;
@@ -27,7 +28,6 @@ fn ensure_gki_kernel() -> Result<()> {
 
 #[cfg(target_os = "android")]
 pub fn get_kernel_version() -> Result<(i32, i32, i32)> {
-    use regex::Regex;
     let uname = rustix::system::uname();
     let version = uname.release().to_string_lossy();
     let re = Regex::new(r"(\d+)\.(\d+)\.(\d+)")?;
@@ -52,7 +52,6 @@ pub fn get_kernel_version() -> Result<(i32, i32, i32)> {
 
 #[cfg(target_os = "android")]
 fn parse_kmi(version: &str) -> Result<String> {
-    use regex::Regex;
     let re = Regex::new(r"(.* )?(\d+\.\d+)(\S+)?(android\d+)(.*)")?;
     let cap = re
         .captures(version)
@@ -75,7 +74,7 @@ fn parse_kmi_from_modules() -> Result<String> {
     // find a *.ko in /vendor/lib/modules
     let modfile = std::fs::read_dir("/vendor/lib/modules")?
         .filter_map(Result::ok)
-        .find(|entry| entry.path().extension().map_or(false, |ext| ext == "ko"))
+        .find(|entry| entry.path().extension().is_some_and(|ext| ext == "ko"))
         .map(|entry| entry.path())
         .ok_or_else(|| anyhow!("No kernel module found"))?;
     let output = Command::new("modinfo").arg(modfile).output()?;
@@ -95,6 +94,63 @@ pub fn get_current_kmi() -> Result<String> {
 #[cfg(not(target_os = "android"))]
 pub fn get_current_kmi() -> Result<String> {
     bail!("Unsupported platform")
+}
+
+fn parse_kmi_from_kernel(kernel: &PathBuf, workdir: &Path) -> Result<String> {
+    use std::fs::{copy, File};
+    use std::io::{BufReader, Read};
+    let kernel_path = workdir.join("kernel");
+    copy(kernel, &kernel_path).context("Failed to copy kernel")?;
+
+    let file = File::open(&kernel_path).context("Failed to open kernel file")?;
+    let mut reader = BufReader::new(file);
+    let mut buffer = Vec::new();
+    reader
+        .read_to_end(&mut buffer)
+        .context("Failed to read kernel file")?;
+
+    let printable_strings: Vec<&str> = buffer
+        .split(|&b| b == 0)
+        .filter_map(|slice| std::str::from_utf8(slice).ok())
+        .filter(|s| s.chars().all(|c| c.is_ascii_graphic() || c == ' '))
+        .collect();
+
+    let re =
+        Regex::new(r"(?:.* )?(\d+\.\d+)(?:\S+)?(android\d+)").context("Failed to compile regex")?;
+    for s in printable_strings {
+        if let Some(caps) = re.captures(s) {
+            if let (Some(kernel_version), Some(android_version)) = (caps.get(1), caps.get(2)) {
+                let kmi = format!("{}-{}", android_version.as_str(), kernel_version.as_str());
+                return Ok(kmi);
+            }
+        }
+    }
+    println!("- Failed to get KMI version");
+    bail!("Try to choose LKM manually")
+}
+
+fn parse_kmi_from_boot(magiskboot: &Path, image: &PathBuf, workdir: &Path) -> Result<String> {
+    let image_path = workdir.join("image");
+
+    std::fs::copy(image, &image_path).context("Failed to copy image")?;
+
+    let status = Command::new(magiskboot)
+        .current_dir(workdir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .arg("unpack")
+        .arg(&image_path)
+        .status()
+        .context("Failed to execute magiskboot command")?;
+
+    if !status.success() {
+        bail!(
+            "magiskboot unpack failed with status: {:?}",
+            status.code().unwrap()
+        );
+    }
+
+    parse_kmi_from_kernel(&image_path, workdir)
 }
 
 fn do_cpio_cmd(magiskboot: &Path, workdir: &Path, cmd: &str) -> Result<()> {
@@ -155,11 +211,18 @@ pub fn restore(
     magiskboot_path: Option<PathBuf>,
     flash: bool,
 ) -> Result<()> {
-    let tmpdir = tempdir::TempDir::new("KernelSU").context("create temp dir failed")?;
+    let tmpdir = tempfile::Builder::new()
+        .prefix("KernelSU")
+        .tempdir()
+        .context("create temp dir failed")?;
     let workdir = tmpdir.path();
     let magiskboot = find_magiskboot(magiskboot_path, workdir)?;
 
-    let (bootimage, bootdevice) = find_boot_image(&image, false, false, workdir)?;
+    let kmi = get_current_kmi().unwrap_or_else(|_| String::from(""));
+
+    let skip_init = kmi.starts_with("android12-");
+
+    let (bootimage, bootdevice) = find_boot_image(&image, skip_init, false, false, workdir)?;
 
     println!("- Unpacking boot image");
     let status = Command::new(&magiskboot)
@@ -306,18 +369,50 @@ fn do_patch(
         );
     }
 
-    let tmpdir = tempdir::TempDir::new("KernelSU").context("create temp dir failed")?;
+    let tmpdir = tempfile::Builder::new()
+        .prefix("KernelSU")
+        .tempdir()
+        .context("create temp dir failed")?;
     let workdir = tmpdir.path();
 
-    let (bootimage, bootdevice) = find_boot_image(&image, ota, is_replace_kernel, workdir)?;
+    // extract magiskboot
+    let magiskboot = find_magiskboot(magiskboot_path, workdir)?;
+
+    let kmi = if let Some(kmi) = kmi {
+        kmi
+    } else {
+        match get_current_kmi() {
+            Ok(value) => value,
+            Err(e) => {
+                println!("- {}", e);
+                if let Some(image_path) = &image {
+                    println!(
+                        "- Trying to auto detect KMI version for {}",
+                        image_path.to_str().unwrap()
+                    );
+                    parse_kmi_from_boot(&magiskboot, image_path, tmpdir.path())?
+                } else if let Some(kernel_path) = &kernel {
+                    println!(
+                        "- Trying to auto detect KMI version for {}",
+                        kernel_path.to_str().unwrap()
+                    );
+                    parse_kmi_from_kernel(kernel_path, tmpdir.path())?
+                } else {
+                    "".to_string()
+                }
+            }
+        }
+    };
+
+    let skip_init = kmi.starts_with("android12-");
+
+    let (bootimage, bootdevice) =
+        find_boot_image(&image, skip_init, ota, is_replace_kernel, workdir)?;
 
     let bootimage = bootimage.display().to_string();
 
     // try extract magiskboot/bootctl
     let _ = assets::ensure_binaries(false);
-
-    // extract magiskboot
-    let magiskboot = find_magiskboot(magiskboot_path, workdir)?;
 
     if let Some(kernel) = kernel {
         std::fs::copy(kernel, workdir.join("kernel")).context("copy kernel from failed")?;
@@ -330,11 +425,6 @@ fn do_patch(
         std::fs::copy(kmod, kmod_file).context("copy kernel module failed")?;
     } else {
         // If kmod is not specified, extract from assets
-        let kmi = if let Some(kmi) = kmi {
-            kmi
-        } else {
-            get_current_kmi().context("Unknown KMI, please choose LKM manually")?
-        };
         println!("- KMI: {kmi}");
         let name = format!("{kmi}_kernelsu.ko");
         assets::copy_assets_to_file(&name, kmod_file)
@@ -537,6 +627,7 @@ fn find_magiskboot(magiskboot_path: Option<PathBuf>, workdir: &Path) -> Result<P
 
 fn find_boot_image(
     image: &Option<PathBuf>,
+    skip_init: bool,
     ota: bool,
     is_replace_kernel: bool,
     workdir: &Path,
@@ -547,6 +638,10 @@ fn find_boot_image(
         ensure!(image.exists(), "boot image not found");
         bootimage = std::fs::canonicalize(image)?;
     } else {
+        if cfg!(not(target_os = "android")) {
+            println!("- Current OS is not android, refusing auto bootimage/bootdevice detection");
+            bail!("Please specify a boot image");
+        }
         let mut slot_suffix =
             utils::getprop("ro.boot.slot_suffix").unwrap_or_else(|| String::from(""));
 
@@ -560,7 +655,7 @@ fn find_boot_image(
 
         let init_boot_exist =
             Path::new(&format!("/dev/block/by-name/init_boot{slot_suffix}")).exists();
-        let boot_partition = if !is_replace_kernel && init_boot_exist {
+        let boot_partition = if !is_replace_kernel && init_boot_exist && !skip_init {
             format!("/dev/block/by-name/init_boot{slot_suffix}")
         } else {
             format!("/dev/block/by-name/boot{slot_suffix}")
