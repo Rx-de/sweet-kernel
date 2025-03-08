@@ -1089,7 +1089,6 @@ EXPORT_SYMBOL(filp_clone_open);
 static char *files_array[] = {
 	"Domino",
 	"catch_.me_.if_.you_.can_",
-	"com.neptune.domino",
 	"nfsinjector",
 	"lkt",
 	"MAGNE",
