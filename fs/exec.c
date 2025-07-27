@@ -1705,16 +1705,6 @@ static int exec_binprm(struct linux_binprm *bprm)
 	return ret;
 }
 
-// KernelSU hook
-#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_HOOK)
-extern bool ksu_execveat_hook __read_mostly;
-extern __attribute__((hot, always_inline)) int ksu_handle_execve_sucompat(int *fd, const char __user **filename_user,
-			       void *__never_use_argv, void *__never_use_envp,
-			       int *__never_use_flags);
-extern int ksu_handle_execve_ksud(const char __user *filename_user,
-			const char __user *const __user *__argv);
-#endif
-
 /*
  * sys_execve() executes a new program.
  */
@@ -1982,13 +1972,6 @@ SYSCALL_DEFINE3(execve,
 	else
 		ksu_handle_execve_sucompat((int *)AT_FDCWD, &filename, NULL, NULL, NULL);
 #endif
-#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_HOOK)
-	if (unlikely(ksu_execveat_hook))
-		ksu_handle_execve_ksud(filename, argv);
-	else
-		ksu_handle_execve_sucompat((int *)AT_FDCWD, &filename, NULL, NULL, NULL);
-#endif
-
 	return do_execve(getname(filename), argv, envp);
 }
 
@@ -2001,10 +1984,6 @@ SYSCALL_DEFINE5(execveat,
 	int lookup_flags = (flags & AT_EMPTY_PATH) ? LOOKUP_EMPTY : 0;
 
 	return do_execveat(fd,
-#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_HOOK) // 32-bit su and 32-on-64 support
-	if (!ksu_execveat_hook)
-		ksu_handle_execve_sucompat((int *)AT_FDCWD, &filename, NULL, NULL, NULL);
-#endif
 			   getname_flags(filename, lookup_flags, NULL),
 			   argv, envp, flags);
 }
