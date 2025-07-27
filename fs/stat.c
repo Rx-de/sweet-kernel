@@ -765,6 +765,3 @@ void inode_set_bytes(struct inode *inode, loff_t bytes)
 }
 
 EXPORT_SYMBOL(inode_set_bytes);
-#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_HOOK)
-	ksu_handle_stat(&dfd, &filename, &flag);
-#endif
